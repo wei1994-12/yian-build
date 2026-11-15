@@ -54,6 +54,20 @@ jobs:
           token: ${{ secrets.SOURCE_PAT }}
           ref: ${{ github.event.inputs.source_ref || 'master' }}
 
+      - name: Patch Dockerfiles for libatomic1 (Debian-13 trixie)
+        run: |
+          set -e
+          for f in backend-web/Dockerfile websocket/Dockerfile scheduler/Dockerfile; do
+            [ -f "$f" ] || continue
+            if grep -q "libatomic1" "$f"; then echo "skip $f (already has libatomic1)"; continue; fi
+            if grep -q "python -m playwright install --with-deps chromium" "$f"; then
+              sed -i 's|python -m playwright install --with-deps chromium|apt-get update && apt-get install -y --no-install-recommends libatomic1 && python -m playwright install --with-deps chromium|' "$f"
+              echo "patched $f"
+            else
+              echo "no-op $f"
+            fi
+          done
+
       - name: Resolve image tag
         id: tag
         run: |
@@ -116,6 +130,8 @@ jobs:
           docker buildx build \
             --platform linux/amd64 \
             "${BUILD_ARGS[@]}" \
+            --cache-from type=gha \
+            --cache-to type=gha,mode=max \
             --provenance=false \
             --sbom=false \
             -f "${{ matrix.dockerfile }}" \
