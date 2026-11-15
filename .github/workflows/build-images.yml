@@ -56,17 +56,26 @@ jobs:
 
       - name: Patch Dockerfiles for libatomic1 (Debian-13 trixie)
         run: |
-          set -e
-          for f in backend-web/Dockerfile websocket/Dockerfile scheduler/Dockerfile; do
-            [ -f "$f" ] || continue
-            if grep -q "libatomic1" "$f"; then echo "skip $f (already has libatomic1)"; continue; fi
-            if grep -q "python -m playwright install --with-deps chromium" "$f"; then
-              sed -i 's|python -m playwright install --with-deps chromium|apt-get update && apt-get install -y --no-install-recommends libatomic1 && python -m playwright install --with-deps chromium|' "$f"
-              echo "patched $f"
-            else
-              echo "no-op $f"
-            fi
-          done
+          python3 - <<'PY'
+          import pathlib
+
+          ANCHOR = "    && rm -rf /var/lib/apt/lists/*"
+          INSERT = "    && apt-get install -y --no-install-recommends libatomic1 \\\n"
+          for t in ["backend-web/Dockerfile", "websocket/Dockerfile", "scheduler/Dockerfile"]:
+              p = pathlib.Path(t)
+              if not p.exists():
+                  print("missing", t)
+                  continue
+              s = p.read_text(encoding="utf-8")
+              if "libatomic1" in s:
+                  print("skip", t, "(already has libatomic1)")
+                  continue
+              if ANCHOR not in s:
+                  print("no anchor in", t)
+                  continue
+              p.write_text(s.replace(ANCHOR, INSERT + ANCHOR, 1), encoding="utf-8")
+              print("patched", t)
+          PY
 
       - name: Resolve image tag
         id: tag
