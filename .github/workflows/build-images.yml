@@ -1,0 +1,134 @@
+name: Build and push images (public builder)
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'IMAGE_TAG (empty = read version.json from source)'
+        required: false
+        default: ''
+      source_ref:
+        description: 'private source ref (default master)'
+        required: false
+        default: 'master'
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+env:
+  SOURCE_REPO: wei1994-12/yian-auto-reply
+  GHCR_REGISTRY: ghcr.io
+  ACR_REGISTRY: crpi-hmn01ibcb84nnrdr.cn-shanghai.personal.cr.aliyuncs.com
+  ACR_NAMESPACE: mnsin
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: xianyu-backend-web
+            dockerfile: backend-web/Dockerfile
+            install_browsers: '1'
+          - name: xianyu-websocket
+            dockerfile: websocket/Dockerfile
+            install_browsers: '1'
+          - name: xianyu-scheduler
+            dockerfile: scheduler/Dockerfile
+            install_browsers: '0'
+          - name: xianyu-frontend
+            dockerfile: docker/frontend/Dockerfile
+            install_browsers: ''
+          - name: xianyu-update-runner
+            dockerfile: updater/Dockerfile
+            install_browsers: ''
+    steps:
+      - name: Checkout private source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          token: ${{ secrets.SOURCE_PAT }}
+          ref: ${{ github.event.inputs.source_ref || 'master' }}
+
+      - name: Resolve image tag
+        id: tag
+        run: |
+          set -euo pipefail
+          if [ -n "${{ github.event.inputs.image_tag }}" ]; then
+            TAG="${{ github.event.inputs.image_tag }}"
+          else
+            TAG=$(python3 -c "import json;print(json.load(open('version.json'))['version'])")
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "IMAGE_TAG=$TAG"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login GHCR (via SOURCE_PAT)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.SOURCE_PAT }}
+
+      - name: Detect ACR credentials
+        id: acr
+        env:
+          ACR_USER: ${{ secrets.ACR_USERNAME }}
+          ACR_PASS: ${{ secrets.ACR_PASSWORD }}
+        run: |
+          if [ -n "$ACR_USER" ] && [ -n "$ACR_PASS" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "[info] ACR push enabled"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "[info] ACR secrets missing, push GHCR only"
+          fi
+
+      - name: Login ACR
+        if: steps.acr.outputs.enabled == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.ACR_REGISTRY }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: Build and push ${{ matrix.name }}
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.tag.outputs.tag }}"
+          GHCR_REF="$GHCR_REGISTRY/${{ github.repository_owner }}/${{ matrix.name }}:$TAG"
+          ACR_REF="$ACR_REGISTRY/$ACR_NAMESPACE/${{ matrix.name }}:$TAG"
+          TAGS=( -t "$GHCR_REF" )
+          if [ "${{ steps.acr.outputs.enabled }}" = "true" ]; then
+            TAGS+=( -t "$ACR_REF" )
+          fi
+          echo "images: ${TAGS[*]}"
+          BUILD_ARGS=()
+          if [ -n "${{ matrix.install_browsers }}" ]; then
+            BUILD_ARGS+=( --build-arg "INSTALL_BROWSERS=${{ matrix.install_browsers }}" )
+          fi
+          docker buildx build \
+            --platform linux/amd64 \
+            "${BUILD_ARGS[@]}" \
+            --provenance=false \
+            --sbom=false \
+            -f "${{ matrix.dockerfile }}" \
+            "${TAGS[@]}" \
+            --push .
+
+      - name: Verify remote manifest
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.tag.outputs.tag }}"
+          echo "[verify] GHCR"
+          docker buildx imagetools inspect "$GHCR_REGISTRY/${{ github.repository_owner }}/${{ matrix.name }}:$TAG"
+          if [ "${{ steps.acr.outputs.enabled }}" = "true" ]; then
+            echo "[verify] ACR"
+            docker buildx imagetools inspect "$ACR_REGISTRY/$ACR_NAMESPACE/${{ matrix.name }}:$TAG"
+          fi
