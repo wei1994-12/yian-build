@@ -121,17 +121,13 @@ jobs:
           username: ${{ secrets.ACR_USERNAME }}
           password: ${{ secrets.ACR_PASSWORD }}
 
-      - name: Build and push ${{ matrix.name }}
+      - name: Build and push ${{ matrix.name }} (GHCR)
+        timeout-minutes: 60
         run: |
           set -euo pipefail
           TAG="${{ steps.tag.outputs.tag }}"
           GHCR_REF="$GHCR_REGISTRY/${{ github.repository_owner }}/${{ matrix.name }}:$TAG"
-          ACR_REF="$ACR_REGISTRY/$ACR_NAMESPACE/${{ matrix.name }}:$TAG"
-          TAGS=( -t "$GHCR_REF" )
-          if [ "${{ steps.acr.outputs.enabled }}" = "true" ]; then
-            TAGS+=( -t "$ACR_REF" )
-          fi
-          echo "images: ${TAGS[*]}"
+          echo "image: $GHCR_REF"
           BUILD_ARGS=()
           if [ -n "${{ matrix.install_browsers }}" ]; then
             BUILD_ARGS+=( --build-arg "INSTALL_BROWSERS=${{ matrix.install_browsers }}" )
@@ -144,10 +140,35 @@ jobs:
             --provenance=false \
             --sbom=false \
             -f "${{ matrix.dockerfile }}" \
-            "${TAGS[@]}" \
+            -t "$GHCR_REF" \
             --push .
 
+      - name: Push to ACR (retry x3)
+        if: steps.acr.outputs.enabled == 'true'
+        timeout-minutes: 60
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.tag.outputs.tag }}"
+          GHCR_REF="$GHCR_REGISTRY/${{ github.repository_owner }}/${{ matrix.name }}:$TAG"
+          ACR_REF="$ACR_REGISTRY/$ACR_NAMESPACE/${{ matrix.name }}:$TAG"
+          echo "[copy] $GHCR_REF -> $ACR_REF"
+          for i in 1 2 3; do
+            echo "[attempt $i/3] imagetools create $ACR_REF"
+            if docker buildx imagetools create -t "$ACR_REF" "$GHCR_REF"; then
+              echo "[ok] ACR push succeeded (attempt $i)"
+              exit 0
+            fi
+            if [ "$i" = "3" ]; then
+              break
+            fi
+            echo "[warn] attempt $i failed, retrying in 60s ..."
+            sleep 60
+          done
+          echo "::error::ACR push failed after 3 attempts: $ACR_REF"
+          exit 1
+
       - name: Verify remote manifest
+        timeout-minutes: 10
         run: |
           set -euo pipefail
           TAG="${{ steps.tag.outputs.tag }}"
